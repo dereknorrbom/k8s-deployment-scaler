@@ -19,12 +19,52 @@ The purpose of this project is to implement a scalable, secure API for managing 
 
 The API will provide the following endpoints:
 
-- **GET /healthz**: Health check endpoint that returns "OK" if the server is running.
-- **GET /replica-count**: Returns the current replica count of the specified deployment.
-- **POST /set-replica-count**: Sets the replica count of the specified deployment.
-- **GET /deployments**: Lists all deployments in the specified namespace.
+- **GET /healthz**: Health check endpoint that returns "OK" if the server is running and Kubernetes connectivity is verified.
+- **GET /replica-count?namespace={namespace}&deployment={deployment}**: Returns the current replica count of the specified deployment.
+- **POST /set-replica-count?namespace={namespace}&deployment={deployment}**: Sets the replica count of the specified deployment.
+- **GET /deployments?namespace={namespace}**: Lists all deployments in the specified namespace.
 
 Each endpoint will be secured using mutual TLS (mTLS) to ensure secure communication between the client and the server.
+
+#### Example JSON Responses
+
+- **GET /healthz**
+   ##### Response:
+   ```json
+   {
+      "status": "OK"
+   }
+   ```
+
+- **GET /replica-count?namespace=default&deployment=my-deployment**
+   ##### Response:
+   ```json
+   {
+      "replicaCount": 3
+   }
+   ```
+
+- **POST /set-replica-count?namespace=default&deployment=my-deployment**
+   ##### Request Body
+   ```json
+   {
+      "replicas": 3
+   }
+   ```
+   ##### Response
+   ```json
+   {
+      "message": "Replica count updated to: 3"
+   }
+   ```
+
+- **GET /deployments?namespace=default**
+   ##### Response
+   ```json
+   {
+      "deployments": ["my-deployment"]
+   }
+   ```
 
 ### Developer Workflow
 
@@ -35,7 +75,7 @@ Each endpoint will be secured using mutual TLS (mTLS) to ensure secure communica
    ```
 
 2. **Run the Setup Script**:
-   A `setup.sh` script will be provided to automate the detection and installation of the required dependencies (Docker, KIND, Helm, kubectl (Kubernetes command-line tool)).
+   A `setup.sh` script will be provided to automate the detection and installation of the required dependencies (Docker, KIND, Helm, kubectl (Kubernetes command-line tool)). The setup script will target x86 64-bit Linux and MacOS environments.
    ```
    make setup
    ```
@@ -53,7 +93,7 @@ The Makefile will streamline the development and deployment workflow by providin
 Proposed Makefile:
 
 ```
-.PHONY: all docker-build kind-create kind-delete kind-recreate load-image deploy clean port-forward generate-certs
+.PHONY: all docker-build kind-create kind-delete kind-recreate load-image deploy clean port-forward generate-certs teardown
 
 # The default target that builds the Docker image, recreates the kind cluster, loads the image, deploys the application, and sets up port forwarding
 all: docker-build generate-certs kind-recreate load-image deploy port-forward
@@ -92,10 +132,13 @@ port-forward:
 	kubectl wait --for=condition=ready pod -l app=k8s-deployment-scaler --timeout=120s
 	kubectl port-forward svc/k8s-deployment-scaler 8080:80
 
-# Clean up by removing the certs directory, deleting the kind cluster, and removing the Docker image
+# Clean up by removing the certs directory
 clean:
 	@echo "Cleaning up..."
 	rm -rf ./certs
+
+# Tear down by deleting the kind cluster and removing the Docker image
+teardown: clean
 	kind delete cluster --name k8s-deployment-scaler
 	docker rmi k8s-deployment-scaler:latest
 
@@ -146,10 +189,9 @@ The API will use mutual TLS (mTLS) for secure communication. This involves the f
 ### Security
 
 The chosen cipher suites for mTLS will be:
-- TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
-- TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
-- TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
-- TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+- TLS_AES_128_GCM_SHA256
+- TLS_AES_256_GCM_SHA384
+- TLS_CHACHA20_POLY1305_SHA256
 
 Additional security measures include:
 - Strict validation of client certificates.
@@ -172,9 +214,18 @@ Testing will be a critical part of ensuring the robustness and security of the A
 
 The API will be delivered as a Docker image, which can be deployed to any Kubernetes cluster using Helm charts. This ensures that the API can be easily deployed and managed in different environments.
 
+#### Kubernetes Resources Deployed by Helm
+
+The Helm chart will deploy the following Kubernetes resources:
+
+- **Deployment**: Manages the deployment of the API Docker container, ensuring the specified number of replicas are running.
+- **Service**: Exposes the API deployment within the Kubernetes cluster, allowing it to be accessed by other services or through port forwarding.
+- **ClusterRole and ClusterRoleBinding**: Grants cluster-wide permissions necessary for the API to interact with Kubernetes resources.
+- **Role and RoleBinding**: Grants namespace-specific permissions for the API to interact with Kubernetes resources.
+
 ### Extending to Multiple Target Kubernetes Clusters
 
-While the current implementation targets a single Kubernetes cluster, extending it to support multiple clusters involves several key considerations:
+While the current implementation targets a single Kubernetes cluster, extending it to support multiple clusters involves several key considerations. Note that this section explains how this might be implemented if it were part of the project scope:
 
 1. **Configuration Management**:
    - Use a configuration file or environment variables to specify the contexts for multiple Kubernetes clusters.
