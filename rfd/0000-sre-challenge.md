@@ -21,7 +21,7 @@ The API will provide the following endpoints:
 
 - **GET /healthz**: Health check endpoint that returns "OK" if the server is running and Kubernetes connectivity is verified.
 - **GET /replica-count?namespace={namespace}&deployment={deployment}**: Returns the current replica count of the specified deployment.
-- **POST /set-replica-count?namespace={namespace}&deployment={deployment}**: Sets the replica count of the specified deployment.
+- **POST /replica-count?namespace={namespace}&deployment={deployment}**: Sets the replica count of the specified deployment.
 - **GET /deployments?namespace={namespace}**: Lists all deployments in the specified namespace.
 
 Each endpoint will be secured using mutual TLS (mTLS) to ensure secure communication between the client and the server.
@@ -44,7 +44,7 @@ Each endpoint will be secured using mutual TLS (mTLS) to ensure secure communica
    }
    ```
 
-- **POST /set-replica-count?namespace=default&deployment=my-deployment**
+- **POST /replica-count?namespace=default&deployment=my-deployment**
    ##### Request Body
    ```json
    {
@@ -54,7 +54,7 @@ Each endpoint will be secured using mutual TLS (mTLS) to ensure secure communica
    ##### Response
    ```json
    {
-      "message": "Replica count updated to: 3"
+      "replicaCount": 3
    }
    ```
 
@@ -62,7 +62,7 @@ Each endpoint will be secured using mutual TLS (mTLS) to ensure secure communica
    ##### Response
    ```json
    {
-      "deployments": ["my-deployment"]
+      "deployments": ["default/my-deployment"]
    }
    ```
 
