@@ -35,12 +35,26 @@ Each endpoint will be secured using mutual TLS (mTLS) to ensure secure communica
       "status": "OK"
    }
    ```
+   ##### Error Response:
+   ```json
+   {
+      "error": "Service unavailable"
+   }
+   ```
 
 - **GET /replica-count?namespace=default&deployment=my-deployment**
    ##### Response:
    ```json
    {
       "replicaCount": 3
+   }
+   ```
+   ##### Error Response:
+   ```json
+   {
+      "error": "Deployment not found",
+      "namespace": "default",
+      "deployment": "my-deployment"
    }
    ```
 
@@ -57,12 +71,34 @@ Each endpoint will be secured using mutual TLS (mTLS) to ensure secure communica
       "replicaCount": 3
    }
    ```
+   ##### Error Response:
+   ```json
+   {
+      "error": "Deployment not found",
+      "namespace": "default",
+      "deployment": "my-deployment"
+   }
+   ```
+   ##### Error Response:
+   ```json
+   {
+      "error": "Invalid replica count",
+      "details": "Replicas must be a non-negative integer"
+   }
+   ```
 
 - **GET /deployments?namespace=default**
    ##### Response
    ```json
    {
       "deployments": ["default/my-deployment"]
+   }
+   ```
+   ##### Error Response:
+   ```json
+   {
+      "error": "Namespace not found",
+      "namespace": "default"
    }
    ```
 
@@ -178,23 +214,27 @@ The API will use a caching mechanism to store and retrieve the replica count of 
    - **UpdateFunc**: Triggered when a deployment is updated. It updates the cache.
    - **DeleteFunc**: Triggered when a deployment is deleted. It removes the entry from the cache.
 
-#### mTLS
-
-The API will use mutual TLS (mTLS) for secure communication. This involves the following steps:
-- Generating a CA certificate and key.
-- Generating server and client certificates signed by the CA.
-- Configuring the server to require client certificates for authentication.
-- Configuring the client to use its certificate and the CA certificate to verify the server.
-
 ### Security
 
-The chosen cipher suites for mTLS will be:
-- TLS_AES_128_GCM_SHA256
-- TLS_AES_256_GCM_SHA384
-- TLS_CHACHA20_POLY1305_SHA256
+The API will employ security measures to ensure secure communication and operations:
 
-Additional security measures include:
-- Strict validation of client certificates.
+- **Mutual TLS (mTLS)**: The API will use mutual TLS for secure communication. This involves both the client and server presenting certificates to authenticate each other.
+
+- **Cipher Suites**: The chosen cipher suites for mTLS will be:
+  - TLS_AES_128_GCM_SHA256
+  - TLS_AES_256_GCM_SHA384
+  - TLS_CHACHA20_POLY1305_SHA256
+
+- **Certificates**: 
+  - For simplicity, self-signed certificates will be used.
+  - These certificates will be generated within the container at runtime.
+  - The `generate_certs.sh` script will handle the creation of the CA, server, and client certificates.
+
+- **Certificate Generation Process**:
+  - CA Certificate and Key: A self-signed CA certificate and key will be generated first.
+  - Server Certificate and Key: Signed by the self-signed CA.
+  - Client Certificate and Key: Also signed by the self-signed CA.
+  - The certificates will be stored in a directory accessible to the application.
 
 ### Testing
 
