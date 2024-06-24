@@ -130,7 +130,7 @@ deploy:
 port-forward:
 	@echo "Setting up port forwarding..."
 	kubectl wait --for=condition=ready pod -l app=k8s-deployment-scaler --timeout=120s
-	kubectl port-forward svc/k8s-deployment-scaler 8080:80
+	kubectl port-forward svc/k8s-deployment-scaler 8443:80
 
 # Clean up by removing the certs directory
 clean:

@@ -15,7 +15,7 @@ func TestHealthCheck(t *testing.T) {
 	}
 
 	rr := httptest.NewRecorder()
-	handler := http.HandlerFunc(healthCheck)
+	handler := setupHandlers()
 
 	handler.ServeHTTP(rr, req)
 
@@ -34,39 +34,66 @@ func TestHealthCheck(t *testing.T) {
 	}
 }
 
-func TestHandleReplicaCount(t *testing.T) {
+func TestHandleGetReplicaCount(t *testing.T) {
 	tests := []struct {
 		name           string
-		method         string
 		url            string
-		body           string
 		expectedStatus int
 		expectedBody   string
 	}{
 		{
 			name:           "GET all replica counts",
-			method:         "GET",
 			url:            "/replica-count",
 			expectedStatus: http.StatusOK,
 			expectedBody:   `{"replicaCounts":{"another-namespace/another-deployment":5,"default/my-deployment":3}}`,
 		},
 		{
 			name:           "GET specific deployment replica count",
-			method:         "GET",
 			url:            "/replica-count?namespace=default&deployment=my-deployment",
 			expectedStatus: http.StatusOK,
 			expectedBody:   `{"replicaCount":3}`,
 		},
 		{
 			name:           "GET missing parameters",
-			method:         "GET",
 			url:            "/replica-count?namespace=default",
 			expectedStatus: http.StatusBadRequest,
-			expectedBody:   "Both namespace and deployment must be specified together\n",
+			expectedBody:   `{"message":"Both namespace and deployment must be specified together","code":400}`,
 		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequest("GET", tt.url, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			rr := httptest.NewRecorder()
+			handler := jsonContentTypeMiddleware(http.HandlerFunc(handleGetReplicaCount))
+
+			handler.ServeHTTP(rr, req)
+
+			if status := rr.Code; status != tt.expectedStatus {
+				t.Errorf("handler returned wrong status code: got %v want %v", status, tt.expectedStatus)
+			}
+
+			if strings.TrimSpace(rr.Body.String()) != strings.TrimSpace(tt.expectedBody) {
+				t.Errorf("handler returned unexpected body: got %v want %v", rr.Body.String(), tt.expectedBody)
+			}
+		})
+	}
+}
+
+func TestHandlePostReplicaCount(t *testing.T) {
+	tests := []struct {
+		name           string
+		url            string
+		body           string
+		expectedStatus int
+		expectedBody   string
+	}{
 		{
 			name:           "POST update replica count",
-			method:         "POST",
 			url:            "/replica-count?namespace=default&deployment=my-deployment",
 			body:           `{"replicas": 5}`,
 			expectedStatus: http.StatusOK,
@@ -74,38 +101,29 @@ func TestHandleReplicaCount(t *testing.T) {
 		},
 		{
 			name:           "POST invalid replica count",
-			method:         "POST",
 			url:            "/replica-count?namespace=default&deployment=my-deployment",
 			body:           `{"replicas": -1}`,
 			expectedStatus: http.StatusBadRequest,
-			expectedBody:   "Replica count must be non-negative\n",
+			expectedBody:   `{"message":"Replica count must be non-negative","code":400}`,
 		},
 		{
 			name:           "POST missing parameters",
-			method:         "POST",
 			url:            "/replica-count?namespace=default",
 			body:           `{"replicas": 5}`,
 			expectedStatus: http.StatusBadRequest,
-			expectedBody:   "Missing query parameters\n",
-		},
-		{
-			name:           "Invalid method",
-			method:         "PUT",
-			url:            "/replica-count",
-			expectedStatus: http.StatusMethodNotAllowed,
-			expectedBody:   "Method not allowed\n",
+			expectedBody:   `{"message":"Missing query parameters","code":400}`,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req, err := http.NewRequest(tt.method, tt.url, strings.NewReader(tt.body))
+			req, err := http.NewRequest("POST", tt.url, strings.NewReader(tt.body))
 			if err != nil {
 				t.Fatal(err)
 			}
 
 			rr := httptest.NewRecorder()
-			handler := http.HandlerFunc(handleReplicaCount)
+			handler := jsonContentTypeMiddleware(http.HandlerFunc(handlePostReplicaCount))
 
 			handler.ServeHTTP(rr, req)
 
@@ -130,12 +148,14 @@ func TestListDeployments(t *testing.T) {
 	}{
 		{
 			name:           "List all deployments",
+			method:         "GET",
 			url:            "/deployments",
 			expectedStatus: http.StatusOK,
 			expectedBody:   `{"deployments":["default/my-deployment","another-namespace/another-deployment"]}`,
 		},
 		{
 			name:           "List deployments for specific namespace",
+			method:         "GET",
 			url:            "/deployments?namespace=test-namespace",
 			expectedStatus: http.StatusOK,
 			expectedBody:   `{"deployments":["test-namespace/my-deployment"]}`,
@@ -145,7 +165,7 @@ func TestListDeployments(t *testing.T) {
 			method:         "POST",
 			url:            "/deployments",
 			expectedStatus: http.StatusMethodNotAllowed,
-			expectedBody:   "Method not allowed\n",
+			expectedBody:   "Method Not Allowed\n",
 		},
 	}
 
@@ -157,7 +177,7 @@ func TestListDeployments(t *testing.T) {
 			}
 
 			rr := httptest.NewRecorder()
-			handler := http.HandlerFunc(listDeployments)
+			handler := setupHandlers()
 
 			handler.ServeHTTP(rr, req)
 
@@ -215,20 +235,53 @@ func TestLoggingMiddleware(t *testing.T) {
 	}
 }
 
+func TestJSONContentTypeMiddleware(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("test"))
+	})
+
+	req, err := http.NewRequest("GET", "/test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	jsonContentTypeMiddleware(handler).ServeHTTP(rr, req)
+
+	if status := rr.Code; status != http.StatusOK {
+		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
+	}
+
+	contentType := rr.Header().Get("Content-Type")
+	if contentType != "application/json" {
+		t.Errorf("middleware did not set correct Content-Type: got %v want %v", contentType, "application/json")
+	}
+
+	expected := "test"
+	if rr.Body.String() != expected {
+		t.Errorf("handler returned unexpected body: got %v want %v", rr.Body.String(), expected)
+	}
+}
+
 func TestSetupHandlers(t *testing.T) {
 	handler := setupHandlers()
 
 	testCases := []struct {
+		method         string
 		path           string
 		expectedStatus int
 	}{
-		{"/healthz", http.StatusOK},
-		{"/replica-count", http.StatusOK},
-		{"/deployments", http.StatusOK},
-		{"/nonexistent", http.StatusNotFound},
+		{"GET", "/healthz", http.StatusOK},
+		{"GET", "/replica-count", http.StatusOK},
+		{"POST", "/replica-count", http.StatusBadRequest}, // Expects query parameters
+		{"GET", "/deployments", http.StatusOK},
+		{"GET", "/nonexistent", http.StatusNotFound},
+		{"POST", "/healthz", http.StatusMethodNotAllowed},
+		{"PUT", "/replica-count", http.StatusMethodNotAllowed},
+		{"DELETE", "/deployments", http.StatusMethodNotAllowed},
 	}
 	for _, tc := range testCases {
-		req, err := http.NewRequest("GET", tc.path, nil)
+		req, err := http.NewRequest(tc.method, tc.path, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -236,7 +289,7 @@ func TestSetupHandlers(t *testing.T) {
 		rr := httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)
 		if status := rr.Code; status != tc.expectedStatus {
-			t.Errorf("handler returned wrong status code for %s: got %v want %v", tc.path, status, tc.expectedStatus)
+			t.Errorf("handler returned wrong status code for %s %s: got %v want %v", tc.method, tc.path, status, tc.expectedStatus)
 		}
 	}
 }

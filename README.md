@@ -41,7 +41,7 @@ This project implements a simple API to manage Kubernetes deployments. The API i
 
 ## Running the Application
 
-Once the Docker container is running, the API will be available at `https://localhost:8080`.
+Once the Docker container is running, the API will be available at `https://localhost:8443`.
 
 ## API Endpoints
 
@@ -107,7 +107,7 @@ Once the Docker container is running, the API will be available at `https://loca
 
 ### Health Check
 ```sh
-curl https://localhost:8080/healthz \
+curl https://localhost:8443/healthz \
     --cert certs/client-cert.pem \
     --key certs/client-key.pem \
     --cacert certs/ca-cert.pem
@@ -115,7 +115,7 @@ curl https://localhost:8080/healthz \
 
 ### Get Replica Count
 ```sh
-curl "https://localhost:8080/replica-count?namespace=namespace&deployment=deployment" \
+curl "https://localhost:8443/replica-count?namespace=namespace&deployment=deployment" \
     --cert certs/client-cert.pem \
     --key certs/client-key.pem \
     --cacert certs/ca-cert.pem
@@ -123,7 +123,7 @@ curl "https://localhost:8080/replica-count?namespace=namespace&deployment=deploy
 ### Set Replica Count
 ```sh
 curl -X POST -H "Content-Type: application/json" -d '{"replicas": 3}' \
-    "https://localhost:8080/replica-count?namespace=namespace&deployment=deployment" \
+    "https://localhost:8443/replica-count?namespace=namespace&deployment=deployment" \
     --cert certs/client-cert.pem \
     --key certs/client-key.pem \
     --cacert certs/ca-cert.pem
@@ -131,13 +131,13 @@ curl -X POST -H "Content-Type: application/json" -d '{"replicas": 3}' \
 
 ### List Deployments
 ```sh
-curl "https://localhost:8080/deployments?namespace=namespace" \
+curl "https://localhost:8443/deployments?namespace=namespace" \
     --cert certs/client-cert.pem \
     --key certs/client-key.pem \
     --cacert certs/ca-cert.pem
 ```
 ```sh
-curl "https://localhost:8080/deployments" \
+curl "https://localhost:8443/deployments" \
     --cert certs/client-cert.pem \
     --key certs/client-key.pem \
     --cacert certs/ca-cert.pem

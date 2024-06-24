@@ -23,7 +23,7 @@ func main() {
 
 	port := os.Getenv("SERVER_PORT")
 	if port == "" {
-		port = "8080"
+		port = "8443"
 	}
 
 	server := &http.Server{
@@ -93,13 +93,12 @@ func loggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// setupHandlers sets up the HTTP handlers for the server
-func setupHandlers() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", healthCheck)
-	mux.HandleFunc("/replica-count", handleReplicaCount)
-	mux.HandleFunc("/deployments", listDeployments)
-	return mux
+// jsonContentTypeMiddleware sets the Content-Type header to application/json for all requests
+func jsonContentTypeMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // encodeAndWriteJSON serializes the given data to JSON and writes it to the http.ResponseWriter.
@@ -112,37 +111,50 @@ func encodeAndWriteJSON(w http.ResponseWriter, data interface{}) error {
 	return nil
 }
 
+// writeJSONError writes an error response in JSON format
+func writeJSONError(w http.ResponseWriter, err apiError) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(err.Code)
+	json.NewEncoder(w).Encode(err)
+}
+
+// writeInternalServerError writes an internal server error response in JSON format
+func writeInternalServerError(w http.ResponseWriter, err error) {
+	log.Printf("Internal server error: %v", err)
+	writeJSONError(w, apiError{
+		Message: "Internal server error",
+		Code:    http.StatusInternalServerError,
+	})
+}
+
+// setupHandlers configures and returns the HTTP request multiplexer
+func setupHandlers() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", jsonContentTypeMiddleware(http.HandlerFunc(healthCheck)).ServeHTTP)
+	mux.HandleFunc("GET /replica-count", jsonContentTypeMiddleware(http.HandlerFunc(handleGetReplicaCount)).ServeHTTP)
+	mux.HandleFunc("POST /replica-count", jsonContentTypeMiddleware(http.HandlerFunc(handlePostReplicaCount)).ServeHTTP)
+	mux.HandleFunc("GET /deployments", jsonContentTypeMiddleware(http.HandlerFunc(listDeployments)).ServeHTTP)
+	return mux
+}
+
+// apiError represents an error response in JSON format
+type apiError struct {
+	Message string `json:"message"`
+	Code    int    `json:"code"`
+}
+
 // healthCheck handles the /healthz endpoint for health checks
 func healthCheck(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
 	if err := encodeAndWriteJSON(w, map[string]string{"status": "OK"}); err != nil {
-		log.Printf("Error in healthCheck: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		writeInternalServerError(w, err)
 	}
 }
 
-// handleReplicaCount handles the /replica-count endpoint for both GET and POST requests.
-func handleReplicaCount(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
+// handleGetReplicaCount handles the /replica-count endpoint for GET requests
+func handleGetReplicaCount(w http.ResponseWriter, r *http.Request) {
 	namespace := r.URL.Query().Get("namespace")
 	deployment := r.URL.Query().Get("deployment")
 
-	switch r.Method {
-	case http.MethodGet:
-		handleGetReplicaCount(w, namespace, deployment)
-	case http.MethodPost:
-		handlePostReplicaCount(w, r, namespace, deployment)
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func handleGetReplicaCount(w http.ResponseWriter, namespace, deployment string) {
 	if namespace == "" && deployment == "" {
 		response := map[string]interface{}{
 			"replicaCounts": map[string]int{
@@ -151,25 +163,33 @@ func handleGetReplicaCount(w http.ResponseWriter, namespace, deployment string) 
 			},
 		}
 		if err := encodeAndWriteJSON(w, response); err != nil {
-			log.Printf("Error in handleGetReplicaCount: %v", err)
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			writeInternalServerError(w, err)
 		}
 	} else if namespace != "" && deployment != "" {
 		response := map[string]interface{}{
 			"replicaCount": 3, // Placeholder response
 		}
 		if err := encodeAndWriteJSON(w, response); err != nil {
-			log.Printf("Error in handleGetReplicaCount: %v", err)
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			writeInternalServerError(w, err)
 		}
 	} else {
-		http.Error(w, "Both namespace and deployment must be specified together", http.StatusBadRequest)
+		writeJSONError(w, apiError{
+			Message: "Both namespace and deployment must be specified together",
+			Code:    http.StatusBadRequest,
+		})
 	}
 }
 
-func handlePostReplicaCount(w http.ResponseWriter, r *http.Request, namespace, deployment string) {
+// handlePostReplicaCount handles the /replica-count endpoint for POST requests
+func handlePostReplicaCount(w http.ResponseWriter, r *http.Request) {
+	namespace := r.URL.Query().Get("namespace")
+	deployment := r.URL.Query().Get("deployment")
+
 	if namespace == "" || deployment == "" {
-		http.Error(w, "Missing query parameters", http.StatusBadRequest)
+		writeJSONError(w, apiError{
+			Message: "Missing query parameters",
+			Code:    http.StatusBadRequest,
+		})
 		return
 	}
 
@@ -178,13 +198,18 @@ func handlePostReplicaCount(w http.ResponseWriter, r *http.Request, namespace, d
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
-		log.Printf("Error parsing request body: %v", err)
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		writeJSONError(w, apiError{
+			Message: "Invalid request body",
+			Code:    http.StatusBadRequest,
+		})
 		return
 	}
 
 	if reqBody.Replicas < 0 {
-		http.Error(w, "Replica count must be non-negative", http.StatusBadRequest)
+		writeJSONError(w, apiError{
+			Message: "Replica count must be non-negative",
+			Code:    http.StatusBadRequest,
+		})
 		return
 	}
 
@@ -194,19 +219,12 @@ func handlePostReplicaCount(w http.ResponseWriter, r *http.Request, namespace, d
 		"replicaCount": reqBody.Replicas,
 	}
 	if err := encodeAndWriteJSON(w, response); err != nil {
-		log.Printf("Error in handlePostReplicaCount: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		writeInternalServerError(w, err)
 	}
 }
 
 // listDeployments handles the /deployments endpoint to list deployments
 func listDeployments(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
 	namespace := r.URL.Query().Get("namespace")
 
 	var response map[string]interface{}
@@ -221,7 +239,6 @@ func listDeployments(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := encodeAndWriteJSON(w, response); err != nil {
-		log.Printf("Error in listDeployments: %v", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		writeInternalServerError(w, err)
 	}
 }
