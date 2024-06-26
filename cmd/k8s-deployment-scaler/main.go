@@ -12,10 +12,62 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	appsv1 "k8s.io/api/apps/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/clientcmd"
 )
+
+// Define the global clientset variable using kubernetes.Interface
+var clientset kubernetes.Interface
+
+// DeploymentInfo stores the relevant information about a Deployment
+type DeploymentInfo struct {
+	Replicas   int32
+	Deployment *appsv1.Deployment
+}
+
+var deploymentInformer cache.SharedIndexInformer
 
 // main initializes and runs the server, setting up TLS configuration, handling graceful shutdown, and defining HTTP routes.
 func main() {
+	// Initialize Kubernetes client
+	var config *rest.Config
+	var err error
+
+	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+		config, err = rest.InClusterConfig()
+	} else {
+		config, err = clientcmd.BuildConfigFromFlags("", os.Getenv("KUBECONFIG"))
+	}
+
+	if err != nil {
+		log.Fatalf("Error building kubeconfig: %v", err)
+	}
+
+	clientset, err = kubernetes.NewForConfig(config)
+	if err != nil {
+		log.Fatalf("Error creating Kubernetes client: %v", err)
+	}
+
+	// Set up deployment informer to watch for changes in deployments
+	factory := informers.NewSharedInformerFactory(clientset, time.Minute*10)
+	deploymentInformer = factory.Apps().V1().Deployments().Informer()
+
+	// Start all informers
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+	factory.Start(stopCh)
+
+	// Wait for the deployment cache to sync
+	if !cache.WaitForCacheSync(stopCh, deploymentInformer.HasSynced) {
+		log.Fatal("Failed to sync deployment informer")
+	}
+
 	tlsConfig, err := setupTLSConfig()
 	if err != nil {
 		log.Fatalf("Failed to set up TLS config: %v", err)
@@ -145,47 +197,79 @@ type apiError struct {
 
 // healthCheck handles the /healthz endpoint for health checks
 func healthCheck(w http.ResponseWriter, r *http.Request) {
+	// Check Kubernetes connectivity
+	_, err := clientset.Discovery().ServerVersion()
+	if err != nil {
+		log.Printf("Kubernetes connectivity check failed: %v", err)
+		writeJSONError(w, apiError{
+			Message: "Kubernetes connectivity check failed",
+			Code:    http.StatusServiceUnavailable,
+		})
+		return
+	}
+
 	if err := encodeAndWriteJSON(w, map[string]string{"status": "OK"}); err != nil {
 		writeInternalServerError(w, err)
 	}
 }
 
+// getDeploymentFromCache retrieves a deployment from the informer's cache
+func getDeploymentFromCache(namespace, name string) (*DeploymentInfo, bool) {
+	key := fmt.Sprintf("%s/%s", namespace, name)
+	obj, exists, err := deploymentInformer.GetIndexer().GetByKey(key)
+	if err != nil {
+		log.Printf("Error getting deployment from cache: %v", err)
+		return nil, false
+	}
+	if !exists {
+		return nil, false
+	}
+	deployment := obj.(*appsv1.Deployment)
+	return &DeploymentInfo{
+		Replicas:   *deployment.Spec.Replicas,
+		Deployment: deployment,
+	}, true
+}
+
 // handleGetReplicaCount handles the /replica-count endpoint for GET requests
 func handleGetReplicaCount(w http.ResponseWriter, r *http.Request) {
 	namespace := r.URL.Query().Get("namespace")
-	deployment := r.URL.Query().Get("deployment")
+	deploymentName := r.URL.Query().Get("deployment")
 
-	if namespace == "" && deployment == "" {
-		response := map[string]interface{}{
-			"replicaCounts": map[string]int{
-				"default/my-deployment":                3,
-				"another-namespace/another-deployment": 5,
-			},
-		}
-		if err := encodeAndWriteJSON(w, response); err != nil {
-			writeInternalServerError(w, err)
-		}
-	} else if namespace != "" && deployment != "" {
-		response := map[string]interface{}{
-			"replicaCount": 3, // Placeholder response
-		}
-		if err := encodeAndWriteJSON(w, response); err != nil {
-			writeInternalServerError(w, err)
-		}
-	} else {
+	// Validate the query parameters
+	if namespace == "" || deploymentName == "" {
 		writeJSONError(w, apiError{
-			Message: "Both namespace and deployment must be specified together",
+			Message: "Both namespace and deployment must be specified",
 			Code:    http.StatusBadRequest,
 		})
+		return
+	}
+
+	// Get the deployment from the cache
+	info, exists := getDeploymentFromCache(namespace, deploymentName)
+	if !exists {
+		writeJSONError(w, apiError{
+			Message: "Deployment not found in cache",
+			Code:    http.StatusNotFound,
+		})
+		return
+	}
+
+	response := map[string]interface{}{
+		"replicaCount": info.Replicas,
+	}
+	if err := encodeAndWriteJSON(w, response); err != nil {
+		writeInternalServerError(w, err)
 	}
 }
 
 // handlePostReplicaCount handles the /replica-count endpoint for POST requests
 func handlePostReplicaCount(w http.ResponseWriter, r *http.Request) {
 	namespace := r.URL.Query().Get("namespace")
-	deployment := r.URL.Query().Get("deployment")
+	deploymentName := r.URL.Query().Get("deployment")
 
-	if namespace == "" || deployment == "" {
+	// Validate the query parameters
+	if namespace == "" || deploymentName == "" {
 		writeJSONError(w, apiError{
 			Message: "Missing query parameters",
 			Code:    http.StatusBadRequest,
@@ -194,9 +278,10 @@ func handlePostReplicaCount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var reqBody struct {
-		Replicas int `json:"replicas"`
+		Replicas int32 `json:"replicas"`
 	}
 
+	// Decode the request body
 	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
 		writeJSONError(w, apiError{
 			Message: "Invalid request body",
@@ -205,6 +290,7 @@ func handlePostReplicaCount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate the replica count
 	if reqBody.Replicas < 0 {
 		writeJSONError(w, apiError{
 			Message: "Replica count must be non-negative",
@@ -213,8 +299,29 @@ func handlePostReplicaCount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Setting replica count for %s/%s to %d", namespace, deployment, reqBody.Replicas)
+	// Get the current deployment from the cache
+	info, exists := getDeploymentFromCache(namespace, deploymentName)
+	if !exists {
+		writeJSONError(w, apiError{
+			Message: "Deployment not found in cache",
+			Code:    http.StatusNotFound,
+		})
+		return
+	}
 
+	// Update the deployment
+	info.Deployment.Spec.Replicas = &reqBody.Replicas
+	_, err := clientset.AppsV1().Deployments(namespace).Update(context.TODO(), info.Deployment, metav1.UpdateOptions{})
+	if err != nil {
+		log.Printf("Failed to update deployment: %v", err)
+		writeJSONError(w, apiError{
+			Message: "Failed to update deployment",
+			Code:    http.StatusInternalServerError,
+		})
+		return
+	}
+
+	// Return the response
 	response := map[string]interface{}{
 		"replicaCount": reqBody.Replicas,
 	}
@@ -227,15 +334,18 @@ func handlePostReplicaCount(w http.ResponseWriter, r *http.Request) {
 func listDeployments(w http.ResponseWriter, r *http.Request) {
 	namespace := r.URL.Query().Get("namespace")
 
-	var response map[string]interface{}
-	if namespace == "" {
-		response = map[string]interface{}{
-			"deployments": []string{"default/my-deployment", "another-namespace/another-deployment"},
+	var deployments []string
+
+	// Use the informer's cache to list deployments
+	for _, obj := range deploymentInformer.GetIndexer().List() {
+		deployment := obj.(*appsv1.Deployment)
+		if namespace == "" || deployment.Namespace == namespace {
+			deployments = append(deployments, fmt.Sprintf("%s/%s", deployment.Namespace, deployment.Name))
 		}
-	} else {
-		response = map[string]interface{}{
-			"deployments": []string{fmt.Sprintf("%s/my-deployment", namespace)},
-		}
+	}
+
+	response := map[string]interface{}{
+		"deployments": deployments,
 	}
 
 	if err := encodeAndWriteJSON(w, response); err != nil {

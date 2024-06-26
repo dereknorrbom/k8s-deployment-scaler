@@ -1,155 +1,124 @@
 # Kubernetes Deployment Scaler API
 
-This project implements a simple API to manage Kubernetes deployments. The API is built with Go and uses mutual TLS (mTLS) for secure communication. The current implementation includes the following features:
+This project implements a secure API to manage Kubernetes deployments. The API is built with Go and uses mutual TLS (mTLS) for secure communication. It provides endpoints to manage deployment replica counts and list deployments, with efficient caching for read operations.
 
-- Health check endpoint
+## Features
+
+- Health check endpoint verifying Kubernetes connectivity
 - Get and set the replica count of a deployment
-- List all deployments in a namespace
-
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Setup](#setup)
-- [Running the Application](#running-the-application)
-- [API Endpoints](#api-endpoints)
-  - [Health Check](#health-check)
-  - [Get Replica Count](#get-replica-count)
-  - [Set Replica Count](#set-replica-count)
-  - [List Deployments](#list-deployments)
-- [Example cURL Commands](#example-curl-commands)
+- List all deployments in a namespace or across all namespaces
+- Secure mTLS communication
+- Efficient caching of deployment information
+- Graceful shutdown handling
+- Comprehensive test suite
 
 ## Prerequisites
 
 - Docker
+- Kind (Kubernetes in Docker)
+- kubectl
 
 ## Setup
 
 1. **Clone the Repository**:
-    ```sh
-    git clone <repository-url>
-    cd k8s-deployment-scaler
-    ```
+   ```sh
+   git clone https://github.com/dereknorrbom/k8s-deployment-scaler.git
+   cd k8s-deployment-scaler
+   ```
 
-2. **Build and Run the Docker Container**:
-    Use the provided Makefile to build and run the Docker container.
-    ```sh
-    make all
-    ```
+2. **Build and Deploy**:
+   Use the provided Makefile to build the Docker image, generate certificates, create a Kind cluster, and deploy the application:
+   ```sh
+   make all
+   ```
 
-3. **Generate Certificates**:
-    Certificates are generated automatically during the build process within the Docker container.
+   This command will:
+   - Build the Docker image
+   - Generate necessary certificates
+   - Create a Kind cluster
+   - Load the image into the cluster
+   - Deploy the application
+   - Set up port forwarding
+
+3. **Manual Setup (if needed)**:
+   If you prefer to set up manually or need to perform steps individually:
+
+   a. Build the Docker image:
+   ```sh
+   make docker-build
+   ```
+
+   b. Generate certificates:
+   ```sh
+   make generate-certs
+   ```
+
+   c. Create a Kind cluster:
+   ```sh
+   make kind-create
+   ```
+
+   d. Load the image and deploy:
+   ```sh
+   make kind-load
+   make kind-deploy
+   ```
+
+   e. Set up port forwarding:
+   ```sh
+   make port-forward
+   ```
 
 ## Running the Application
 
-Once the Docker container is running, the API will be available at `https://localhost:8443`.
+Once setup is complete and port forwarding is active, the API will be available at `https://localhost:8443`.
 
 ## API Endpoints
 
-### Health Check
+- **Health Check**: `GET /healthz`
+- **Get Replica Count**: `GET /replica-count?namespace=<namespace>&deployment=<deployment>`
+- **Set Replica Count**: `POST /replica-count?namespace=<namespace>&deployment=<deployment>`
+- **List Deployments**: `GET /deployments?namespace=<namespace>` (namespace is optional)
 
-- **Endpoint**: `/healthz`
-- **Method**: `GET`
-- **Response**:
-    ```json
-    {
-        "status": "OK"
-    }
-    ```
+## Testing
 
-### Get Replica Count
-
-- **Endpoint**: `/replica-count`
-- **Method**: `GET`
-- **Query Parameters**:
-    - `namespace`: The namespace of the deployment
-    - `deployment`: The name of the deployment
-- **Response**:
-    ```json
-    {
-        "replicaCount": 3
-    }
-    ```
-
-### Set Replica Count
-
-- **Endpoint**: `/replica-count`
-- **Method**: `POST`
-- **Query Parameters**:
-    - `namespace`: The namespace of the deployment
-    - `deployment`: The name of the deployment
-- **Request Body**:
-    ```json
-    {
-        "replicas": 3
-    }
-    ```
-- **Response**:
-    ```json
-    {
-        "replicas": 3
-    }
-    ```
-
-### List Deployments
-
-- **Endpoint**: `/deployments`
-- **Method**: `GET`
-- **Query Parameters**:
-    - `namespace` (optional): The namespace to list deployments from
-- **Response**:
-    ```json
-    {
-        "deployments": ["default/my-deployment", "another-namespace/another-deployment"]
-    }
-    ```
-
-## Example cURL Commands
-
-### Health Check
+Run the test suite:
 ```sh
-curl https://localhost:8443/healthz \
-    --cert certs/client-cert.pem \
-    --key certs/client-key.pem \
-    --cacert certs/ca-cert.pem
+make test
 ```
 
-### Get Replica Count
+Individual endpoint tests:
 ```sh
-curl "https://localhost:8443/replica-count?namespace=namespace&deployment=deployment" \
-    --cert certs/client-cert.pem \
-    --key certs/client-key.pem \
-    --cacert certs/ca-cert.pem
-```
-### Set Replica Count
-```sh
-curl -X POST -H "Content-Type: application/json" -d '{"replicas": 3}' \
-    "https://localhost:8443/replica-count?namespace=namespace&deployment=deployment" \
-    --cert certs/client-cert.pem \
-    --key certs/client-key.pem \
-    --cacert certs/ca-cert.pem
+make test-health
+make test-get-replica-count
+make test-set-replica-count
+make test-get-deployments
 ```
 
-### List Deployments
+## Cleanup
+
+To remove the Kind cluster and clean up resources:
 ```sh
-curl "https://localhost:8443/deployments?namespace=namespace" \
-    --cert certs/client-cert.pem \
-    --key certs/client-key.pem \
-    --cacert certs/ca-cert.pem
-```
-```sh
-curl "https://localhost:8443/deployments" \
-    --cert certs/client-cert.pem \
-    --key certs/client-key.pem \
-    --cacert certs/ca-cert.pem
+make teardown
 ```
 
-### Makefile
-The Makefile includes several useful commands to streamline the development and deployment process:
+## Makefile Commands
 
-- `make all`: Build the Docker image, generate the certificates, and run the application.
-- `make docker-build`: Build the Docker image for the application.
-- `make generate-certs`: Generate certificates by copying them from the Docker image to the local certs directory.
-- `make run`: Run the Docker image.
-- `make clean`: Clean up by removing the certs directory.
-- `make teardown`: Tear down by removing the Docker image.
-- `make test`: Run the test suite.
+- `make all`: Build, generate certs, create cluster, and deploy
+- `make docker-build`: Build the Docker image
+- `make generate-certs`: Generate necessary certificates
+- `make kind-create`: Create a Kind cluster
+- `make kind-load`: Load the Docker image into the Kind cluster
+- `make kind-deploy`: Deploy the application to the Kind cluster
+- `make port-forward`: Set up port forwarding
+- `make clean`: Remove generated files and certificates
+- `make teardown`: Full cleanup including Kind cluster deletion
+- `make test`: Run the Go test suite
+
+## Security
+
+This application uses mTLS for secure communication. Certificates are generated during the build process and stored in the `certs` directory.
+
+## Caching
+
+The application implements an efficient caching mechanism using Kubernetes informers to keep deployment information up-to-date and serve read requests quickly without querying the Kubernetes API for every request.
