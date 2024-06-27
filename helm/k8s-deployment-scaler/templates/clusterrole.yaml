@@ -4,5 +4,5 @@ metadata:
   name: k8s-deployment-scaler-clusterrole
 rules:
 - apiGroups: ["apps"]
-  resources: ["deployments"]
+  resources: ["deployments", "deployments/scale"]
   verbs: ["get", "list", "watch", "update"]

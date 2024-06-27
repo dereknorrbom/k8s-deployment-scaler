@@ -7,30 +7,31 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
+	appslisters "k8s.io/client-go/listers/apps/v1"
 )
 
 // Helper function to set up the test environment
-func setupTestEnvironment() (*fake.Clientset, informers.SharedInformerFactory, chan struct{}) {
+func setupTestEnvironment() (*fake.Clientset, appslisters.DeploymentLister, chan struct{}) {
 	fakeClientset := fake.NewSimpleClientset()
 	factory := informers.NewSharedInformerFactory(fakeClientset, 0)
 	deploymentInformer := factory.Apps().V1().Deployments()
-	deploymentLister = deploymentInformer.Lister()
-	deploymentsSynced = deploymentInformer.Informer().HasSynced
+	deploymentLister := deploymentInformer.Lister()
 
 	stopCh := make(chan struct{})
 	factory.Start(stopCh)
 	factory.WaitForCacheSync(stopCh)
 
-	return fakeClientset, factory, stopCh
+	return fakeClientset, deploymentLister, stopCh
 }
 
 func TestHealthCheck(t *testing.T) {
-	fakeClientset, _, stopCh := setupTestEnvironment()
+	fakeClientset, deploymentLister, stopCh := setupTestEnvironment()
 	defer close(stopCh)
 
 	clientset = fakeClientset
@@ -41,7 +42,7 @@ func TestHealthCheck(t *testing.T) {
 	}
 
 	rr := httptest.NewRecorder()
-	handler := setupHandlers()
+	handler := setupHandlers(deploymentLister)
 
 	handler.ServeHTTP(rr, req)
 
@@ -61,7 +62,7 @@ func TestHealthCheck(t *testing.T) {
 }
 
 func TestHandleGetReplicaCount(t *testing.T) {
-	fakeClientset, _, stopCh := setupTestEnvironment()
+	fakeClientset, deploymentLister, stopCh := setupTestEnvironment()
 	defer close(stopCh)
 
 	clientset = fakeClientset
@@ -79,6 +80,9 @@ func TestHandleGetReplicaCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error creating test deployment: %v", err)
 	}
+
+	// Wait for the cache to sync
+	time.Sleep(100 * time.Millisecond)
 
 	tests := []struct {
 		name           string
@@ -114,7 +118,9 @@ func TestHandleGetReplicaCount(t *testing.T) {
 			}
 
 			rr := httptest.NewRecorder()
-			handler := jsonContentTypeMiddleware(http.HandlerFunc(handleGetReplicaCount))
+			handler := jsonContentTypeMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleGetReplicaCount(w, r, deploymentLister)
+			}))
 
 			handler.ServeHTTP(rr, req)
 
@@ -149,6 +155,9 @@ func TestHandlePostReplicaCount(t *testing.T) {
 		t.Fatalf("Error creating test deployment: %v", err)
 	}
 
+	// Wait for the cache to sync
+	time.Sleep(100 * time.Millisecond)
+
 	tests := []struct {
 		name           string
 		url            string
@@ -182,7 +191,7 @@ func TestHandlePostReplicaCount(t *testing.T) {
 			url:            "/replica-count?namespace=default&deployment=non-existent",
 			body:           `{"replicas": 5}`,
 			expectedStatus: http.StatusNotFound,
-			expectedBody:   `{"message":"Deployment not found in cache","code":404}`,
+			expectedBody:   `{"message":"Deployment not found","code":404}`,
 		},
 	}
 
@@ -222,7 +231,7 @@ func TestHandlePostReplicaCount(t *testing.T) {
 }
 
 func TestListDeployments(t *testing.T) {
-	fakeClientset, _, stopCh := setupTestEnvironment()
+	fakeClientset, deploymentLister, stopCh := setupTestEnvironment()
 	defer close(stopCh)
 
 	clientset = fakeClientset
@@ -255,6 +264,9 @@ func TestListDeployments(t *testing.T) {
 			t.Fatalf("Error creating test deployment: %v", err)
 		}
 	}
+
+	// Wait for the cache to sync
+	time.Sleep(100 * time.Millisecond)
 
 	tests := []struct {
 		name                string
@@ -295,12 +307,12 @@ func TestListDeployments(t *testing.T) {
 			}
 
 			rr := httptest.NewRecorder()
-			handler := setupHandlers()
+			handler := setupHandlers(deploymentLister)
 
 			handler.ServeHTTP(rr, req)
 
 			if status := rr.Code; status != tt.expectedStatus {
-				t.Errorf("handler returned wrong status code: got %v want %v", status, tt.expectedStatus)
+				t.Errorf("handler returned wrong status code for %s %s: got %v want %v", tt.method, tt.url, status, tt.expectedStatus)
 			}
 
 			if tt.expectedDeployments != nil {
@@ -407,12 +419,12 @@ func TestJSONContentTypeMiddleware(t *testing.T) {
 }
 
 func TestSetupHandlers(t *testing.T) {
-	handler := setupHandlers()
-
-	fakeClientset, _, stopCh := setupTestEnvironment()
+	fakeClientset, deploymentLister, stopCh := setupTestEnvironment()
 	defer close(stopCh)
 
 	clientset = fakeClientset
+
+	handler := setupHandlers(deploymentLister)
 
 	// Create a test deployment
 	_, err := fakeClientset.AppsV1().Deployments("default").Create(context.TODO(), &appsv1.Deployment{
@@ -427,6 +439,9 @@ func TestSetupHandlers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error creating test deployment: %v", err)
 	}
+
+	// Wait for the cache to sync
+	time.Sleep(100 * time.Millisecond)
 
 	testCases := []struct {
 		method         string
@@ -457,7 +472,7 @@ func TestSetupHandlers(t *testing.T) {
 }
 
 func TestGetDeploymentFromCache(t *testing.T) {
-	fakeClientset, _, stopCh := setupTestEnvironment()
+	fakeClientset, deploymentLister, stopCh := setupTestEnvironment()
 	defer close(stopCh)
 
 	clientset = fakeClientset
@@ -475,6 +490,9 @@ func TestGetDeploymentFromCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error creating test deployment: %v", err)
 	}
+
+	// Wait for the cache to sync
+	time.Sleep(100 * time.Millisecond)
 
 	tests := []struct {
 		name             string
@@ -500,7 +518,7 @@ func TestGetDeploymentFromCache(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			deployment, found := getDeploymentFromCache(tt.namespace, tt.deploymentName)
+			deployment, found := getDeploymentFromCache(tt.namespace, tt.deploymentName, deploymentLister)
 			if found != tt.expectedFound {
 				t.Errorf("getDeploymentFromCache() found = %v, want %v", found, tt.expectedFound)
 			}
