@@ -14,9 +14,12 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	appslisters "k8s.io/client-go/listers/apps/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
@@ -25,13 +28,14 @@ import (
 // Define the global clientset variable using kubernetes.Interface
 var clientset kubernetes.Interface
 
-// DeploymentInfo stores the relevant information about a Deployment
-type DeploymentInfo struct {
-	Replicas   int32
-	Deployment *appsv1.Deployment
-}
+var (
+	deploymentLister  appslisters.DeploymentLister
+	deploymentsSynced cache.InformerSynced
+)
 
-var deploymentInformer cache.SharedIndexInformer
+func getKubernetesConfig() (*rest.Config, error) {
+	return clientcmd.BuildConfigFromFlags("", os.Getenv("KUBECONFIG"))
+}
 
 // main initializes and runs the server, setting up TLS configuration, handling graceful shutdown, and defining HTTP routes.
 func main() {
@@ -39,12 +43,7 @@ func main() {
 	var config *rest.Config
 	var err error
 
-	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
-		config, err = rest.InClusterConfig()
-	} else {
-		config, err = clientcmd.BuildConfigFromFlags("", os.Getenv("KUBECONFIG"))
-	}
-
+	config, err = getKubernetesConfig()
 	if err != nil {
 		log.Fatalf("Error building kubeconfig: %v", err)
 	}
@@ -54,9 +53,11 @@ func main() {
 		log.Fatalf("Error creating Kubernetes client: %v", err)
 	}
 
-	// Set up deployment informer to watch for changes in deployments
+	// Set up deployment informer and lister
 	factory := informers.NewSharedInformerFactory(clientset, time.Minute*10)
-	deploymentInformer = factory.Apps().V1().Deployments().Informer()
+	deploymentInformer := factory.Apps().V1().Deployments()
+	deploymentLister = deploymentInformer.Lister()
+	deploymentsSynced = deploymentInformer.Informer().HasSynced
 
 	// Start all informers
 	stopCh := make(chan struct{})
@@ -64,7 +65,7 @@ func main() {
 	factory.Start(stopCh)
 
 	// Wait for the deployment cache to sync
-	if !cache.WaitForCacheSync(stopCh, deploymentInformer.HasSynced) {
+	if !cache.WaitForCacheSync(stopCh, deploymentsSynced) {
 		log.Fatal("Failed to sync deployment informer")
 	}
 
@@ -213,22 +214,17 @@ func healthCheck(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// getDeploymentFromCache retrieves a deployment from the informer's cache
-func getDeploymentFromCache(namespace, name string) (*DeploymentInfo, bool) {
-	key := fmt.Sprintf("%s/%s", namespace, name)
-	obj, exists, err := deploymentInformer.GetIndexer().GetByKey(key)
+// getDeploymentFromCache retrieves a deployment from the lister
+func getDeploymentFromCache(namespace, name string) (*appsv1.Deployment, bool) {
+	deployment, err := deploymentLister.Deployments(namespace).Get(name)
 	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil, false
+		}
 		log.Printf("Error getting deployment from cache: %v", err)
 		return nil, false
 	}
-	if !exists {
-		return nil, false
-	}
-	deployment := obj.(*appsv1.Deployment)
-	return &DeploymentInfo{
-		Replicas:   *deployment.Spec.Replicas,
-		Deployment: deployment,
-	}, true
+	return deployment, true
 }
 
 // handleGetReplicaCount handles the /replica-count endpoint for GET requests
@@ -245,8 +241,7 @@ func handleGetReplicaCount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get the deployment from the cache
-	info, exists := getDeploymentFromCache(namespace, deploymentName)
+	deployment, exists := getDeploymentFromCache(namespace, deploymentName)
 	if !exists {
 		writeJSONError(w, apiError{
 			Message: "Deployment not found in cache",
@@ -256,7 +251,7 @@ func handleGetReplicaCount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := map[string]interface{}{
-		"replicaCount": info.Replicas,
+		"replicaCount": *deployment.Spec.Replicas,
 	}
 	if err := encodeAndWriteJSON(w, response); err != nil {
 		writeInternalServerError(w, err)
@@ -299,8 +294,7 @@ func handlePostReplicaCount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get the current deployment from the cache
-	info, exists := getDeploymentFromCache(namespace, deploymentName)
+	deployment, exists := getDeploymentFromCache(namespace, deploymentName)
 	if !exists {
 		writeJSONError(w, apiError{
 			Message: "Deployment not found in cache",
@@ -310,8 +304,10 @@ func handlePostReplicaCount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Update the deployment
-	info.Deployment.Spec.Replicas = &reqBody.Replicas
-	_, err := clientset.AppsV1().Deployments(namespace).Update(context.TODO(), info.Deployment, metav1.UpdateOptions{})
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	deployment.Spec.Replicas = &reqBody.Replicas
+	_, err := clientset.AppsV1().Deployments(namespace).Update(ctx, deployment, metav1.UpdateOptions{})
 	if err != nil {
 		log.Printf("Failed to update deployment: %v", err)
 		writeJSONError(w, apiError{
@@ -335,13 +331,26 @@ func listDeployments(w http.ResponseWriter, r *http.Request) {
 	namespace := r.URL.Query().Get("namespace")
 
 	var deployments []string
+	var err error
+	var list []*appsv1.Deployment
 
-	// Use the informer's cache to list deployments
-	for _, obj := range deploymentInformer.GetIndexer().List() {
-		deployment := obj.(*appsv1.Deployment)
-		if namespace == "" || deployment.Namespace == namespace {
-			deployments = append(deployments, fmt.Sprintf("%s/%s", deployment.Namespace, deployment.Name))
-		}
+	if namespace == "" {
+		list, err = deploymentLister.List(labels.Everything())
+	} else {
+		list, err = deploymentLister.Deployments(namespace).List(labels.Everything())
+	}
+
+	if err != nil {
+		log.Printf("Error listing deployments: %v", err)
+		writeJSONError(w, apiError{
+			Message: "Failed to list deployments",
+			Code:    http.StatusInternalServerError,
+		})
+		return
+	}
+
+	for _, deployment := range list {
+		deployments = append(deployments, fmt.Sprintf("%s/%s", deployment.Namespace, deployment.Name))
 	}
 
 	response := map[string]interface{}{

@@ -1,0 +1,18 @@
+replicaCount: null
+
+image:
+  repository: k8s-deployment-scaler
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8443
+
+resources: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

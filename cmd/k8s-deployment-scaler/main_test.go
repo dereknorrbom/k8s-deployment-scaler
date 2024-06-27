@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,19 +14,26 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
-func TestHealthCheck(t *testing.T) {
-	// Initialize the clientset with a fake client
-	clientset = fake.NewSimpleClientset()
+// Helper function to set up the test environment
+func setupTestEnvironment() (*fake.Clientset, informers.SharedInformerFactory, chan struct{}) {
+	fakeClientset := fake.NewSimpleClientset()
+	factory := informers.NewSharedInformerFactory(fakeClientset, 0)
+	deploymentInformer := factory.Apps().V1().Deployments()
+	deploymentLister = deploymentInformer.Lister()
+	deploymentsSynced = deploymentInformer.Informer().HasSynced
 
-	// Set up the fake informer
-	factory := informers.NewSharedInformerFactory(clientset, 0)
-	deploymentInformer = factory.Apps().V1().Deployments().Informer()
-
-	// Start the informer and wait for the cache to sync
 	stopCh := make(chan struct{})
 	factory.Start(stopCh)
 	factory.WaitForCacheSync(stopCh)
+
+	return fakeClientset, factory, stopCh
+}
+
+func TestHealthCheck(t *testing.T) {
+	fakeClientset, _, stopCh := setupTestEnvironment()
 	defer close(stopCh)
+
+	clientset = fakeClientset
 
 	req, err := http.NewRequest("GET", "/healthz", nil)
 	if err != nil {
@@ -53,8 +61,13 @@ func TestHealthCheck(t *testing.T) {
 }
 
 func TestHandleGetReplicaCount(t *testing.T) {
-	// Create a fake clientset with a deployment
-	fakeClientset := fake.NewSimpleClientset(&appsv1.Deployment{
+	fakeClientset, _, stopCh := setupTestEnvironment()
+	defer close(stopCh)
+
+	clientset = fakeClientset
+
+	// Create a test deployment
+	_, err := fakeClientset.AppsV1().Deployments("default").Create(context.TODO(), &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "my-deployment",
 			Namespace: "default",
@@ -62,17 +75,10 @@ func TestHandleGetReplicaCount(t *testing.T) {
 		Spec: appsv1.DeploymentSpec{
 			Replicas: int32Ptr(3),
 		},
-	})
-
-	// Set up the fake informer
-	factory := informers.NewSharedInformerFactory(fakeClientset, 0)
-	deploymentInformer = factory.Apps().V1().Deployments().Informer()
-
-	// Start the informer and wait for the cache to sync
-	stopCh := make(chan struct{})
-	factory.Start(stopCh)
-	factory.WaitForCacheSync(stopCh)
-	defer close(stopCh)
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("Error creating test deployment: %v", err)
+	}
 
 	tests := []struct {
 		name           string
@@ -85,7 +91,18 @@ func TestHandleGetReplicaCount(t *testing.T) {
 			url:            "/replica-count?namespace=default&deployment=my-deployment",
 			expectedStatus: http.StatusOK,
 			expectedBody:   `{"replicaCount":3}`,
-			// ... (rest of the test cases)
+		},
+		{
+			name:           "GET missing parameters",
+			url:            "/replica-count",
+			expectedStatus: http.StatusBadRequest,
+			expectedBody:   `{"message":"Both namespace and deployment must be specified","code":400}`,
+		},
+		{
+			name:           "GET non-existent deployment",
+			url:            "/replica-count?namespace=default&deployment=non-existent",
+			expectedStatus: http.StatusNotFound,
+			expectedBody:   `{"message":"Deployment not found in cache","code":404}`,
 		},
 	}
 
@@ -113,8 +130,13 @@ func TestHandleGetReplicaCount(t *testing.T) {
 }
 
 func TestHandlePostReplicaCount(t *testing.T) {
-	// Create a fake clientset
-	fakeClientset := fake.NewSimpleClientset(&appsv1.Deployment{
+	fakeClientset, _, stopCh := setupTestEnvironment()
+	defer close(stopCh)
+
+	clientset = fakeClientset
+
+	// Create a test deployment
+	_, err := fakeClientset.AppsV1().Deployments("default").Create(context.TODO(), &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "my-deployment",
 			Namespace: "default",
@@ -122,20 +144,10 @@ func TestHandlePostReplicaCount(t *testing.T) {
 		Spec: appsv1.DeploymentSpec{
 			Replicas: int32Ptr(3),
 		},
-	})
-
-	// Set up the fake informer
-	factory := informers.NewSharedInformerFactory(fakeClientset, 0)
-	deploymentInformer = factory.Apps().V1().Deployments().Informer()
-
-	// Start the informer and wait for the cache to sync
-	stopCh := make(chan struct{})
-	factory.Start(stopCh)
-	factory.WaitForCacheSync(stopCh)
-	defer close(stopCh)
-
-	// Set the global clientset to our fake clientset
-	clientset = fakeClientset
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("Error creating test deployment: %v", err)
+	}
 
 	tests := []struct {
 		name           string
@@ -210,37 +222,39 @@ func TestHandlePostReplicaCount(t *testing.T) {
 }
 
 func TestListDeployments(t *testing.T) {
-	// Create a fake clientset with multiple deployments
-	fakeClientset := fake.NewSimpleClientset(
-		&appsv1.Deployment{
+	fakeClientset, _, stopCh := setupTestEnvironment()
+	defer close(stopCh)
+
+	clientset = fakeClientset
+
+	// Create test deployments
+	deployments := []*appsv1.Deployment{
+		{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "my-deployment",
 				Namespace: "default",
 			},
 		},
-		&appsv1.Deployment{
+		{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "another-deployment",
 				Namespace: "another-namespace",
 			},
 		},
-		&appsv1.Deployment{
+		{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "my-deployment",
 				Namespace: "test-namespace",
 			},
 		},
-	)
+	}
 
-	// Set up the fake informer
-	factory := informers.NewSharedInformerFactory(fakeClientset, 0)
-	deploymentInformer = factory.Apps().V1().Deployments().Informer()
-
-	// Start the informer and wait for the cache to sync
-	stopCh := make(chan struct{})
-	factory.Start(stopCh)
-	factory.WaitForCacheSync(stopCh)
-	defer close(stopCh)
+	for _, dep := range deployments {
+		_, err := fakeClientset.AppsV1().Deployments(dep.Namespace).Create(context.TODO(), dep, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatalf("Error creating test deployment: %v", err)
+		}
+	}
 
 	tests := []struct {
 		name                string
@@ -395,8 +409,13 @@ func TestJSONContentTypeMiddleware(t *testing.T) {
 func TestSetupHandlers(t *testing.T) {
 	handler := setupHandlers()
 
-	// Create a fake clientset with a deployment
-	fakeClientset := fake.NewSimpleClientset(&appsv1.Deployment{
+	fakeClientset, _, stopCh := setupTestEnvironment()
+	defer close(stopCh)
+
+	clientset = fakeClientset
+
+	// Create a test deployment
+	_, err := fakeClientset.AppsV1().Deployments("default").Create(context.TODO(), &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-deployment",
 			Namespace: "default",
@@ -404,17 +423,10 @@ func TestSetupHandlers(t *testing.T) {
 		Spec: appsv1.DeploymentSpec{
 			Replicas: int32Ptr(3),
 		},
-	})
-
-	// Set up the fake informer
-	factory := informers.NewSharedInformerFactory(fakeClientset, 0)
-	deploymentInformer = factory.Apps().V1().Deployments().Informer()
-
-	// Start the informer and wait for the cache to sync
-	stopCh := make(chan struct{})
-	factory.Start(stopCh)
-	factory.WaitForCacheSync(stopCh)
-	defer close(stopCh)
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("Error creating test deployment: %v", err)
+	}
 
 	testCases := []struct {
 		method         string
@@ -445,8 +457,13 @@ func TestSetupHandlers(t *testing.T) {
 }
 
 func TestGetDeploymentFromCache(t *testing.T) {
-	// Create a fake clientset with a deployment
-	fakeClientset := fake.NewSimpleClientset(&appsv1.Deployment{
+	fakeClientset, _, stopCh := setupTestEnvironment()
+	defer close(stopCh)
+
+	clientset = fakeClientset
+
+	// Create a test deployment
+	_, err := fakeClientset.AppsV1().Deployments("default").Create(context.TODO(), &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "existing-deployment",
 			Namespace: "default",
@@ -454,17 +471,10 @@ func TestGetDeploymentFromCache(t *testing.T) {
 		Spec: appsv1.DeploymentSpec{
 			Replicas: int32Ptr(3),
 		},
-	})
-
-	// Set up the fake informer
-	factory := informers.NewSharedInformerFactory(fakeClientset, 0)
-	deploymentInformer = factory.Apps().V1().Deployments().Informer()
-
-	// Start the informer and wait for the cache to sync
-	stopCh := make(chan struct{})
-	factory.Start(stopCh)
-	factory.WaitForCacheSync(stopCh)
-	defer close(stopCh)
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("Error creating test deployment: %v", err)
+	}
 
 	tests := []struct {
 		name             string
@@ -490,12 +500,12 @@ func TestGetDeploymentFromCache(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			info, found := getDeploymentFromCache(tt.namespace, tt.deploymentName)
+			deployment, found := getDeploymentFromCache(tt.namespace, tt.deploymentName)
 			if found != tt.expectedFound {
 				t.Errorf("getDeploymentFromCache() found = %v, want %v", found, tt.expectedFound)
 			}
-			if found && info.Replicas != tt.expectedReplicas {
-				t.Errorf("getDeploymentFromCache() replicas = %v, want %v", info.Replicas, tt.expectedReplicas)
+			if found && *deployment.Spec.Replicas != tt.expectedReplicas {
+				t.Errorf("getDeploymentFromCache() replicas = %v, want %v", *deployment.Spec.Replicas, tt.expectedReplicas)
 			}
 		})
 	}
