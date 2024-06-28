@@ -1,4 +1,5 @@
 replicaCount: null
+namespace: k8s-deployment-scaler
 
 image:
   repository: k8s-deployment-scaler

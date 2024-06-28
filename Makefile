@@ -1,5 +1,6 @@
 # Define common variables
 APP_NAME := k8s-deployment-scaler
+KUBE_NAMESPACE := $(APP_NAME)
 DOCKER_IMAGE := $(APP_NAME)
 DOCKER_TAG := latest
 BUILDER_IMAGE := $(DOCKER_IMAGE)-builder:$(DOCKER_TAG)
@@ -45,9 +46,9 @@ kind-load:
 # Deploy the Helm chart
 deploy:
 	@echo "Deploying Helm chart..."
-	helm upgrade --install $(DOCKER_IMAGE) ./helm/$(APP_NAME)
+	helm upgrade --install $(DOCKER_IMAGE) ./helm/$(APP_NAME) --namespace $(KUBE_NAMESPACE) --create-namespace
 	@echo "Waiting for deployment to be ready..."
-	kubectl rollout status deployment/$(APP_NAME) --timeout=120s
+	kubectl rollout status deployment/$(APP_NAME) --namespace $(KUBE_NAMESPACE) --timeout=120s
 
 # Upgrade the Helm chart
 helm-upgrade:
@@ -57,9 +58,9 @@ helm-upgrade:
 # Port forward the service to the local machine
 port-forward:
 	@echo "Waiting for pod to be ready..."
-	kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=$(APP_NAME) --timeout=120s
-	POD_NAME=$$(kubectl get pods -l app.kubernetes.io/name=$(APP_NAME) -o jsonpath="{.items[0].metadata.name}") && \
-	kubectl port-forward pod/$$POD_NAME 8443:8443
+	kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=$(APP_NAME) --namespace $(KUBE_NAMESPACE) --timeout=120s
+	POD_NAME=$$(kubectl get pods -l app.kubernetes.io/name=$(APP_NAME) -o jsonpath="{.items[0].metadata.name}" --namespace $(KUBE_NAMESPACE)) && \
+	kubectl port-forward pod/$$POD_NAME 8443:8443 --namespace $(KUBE_NAMESPACE)
 
 # Delete the KIND cluster
 kind-delete:
@@ -94,12 +95,12 @@ test-health:
 # Get the replica count of the deployment
 test-get-replica-count:
 	@echo "Running test to get replica count..."
-	$(call curl_command,GET,/replica-count?namespace=default\&deployment=$(APP_NAME))
+	$(call curl_command,GET,/replica-count?namespace=$(KUBE_NAMESPACE)\&deployment=$(APP_NAME))
 
 # Set the replica count of the deployment
 test-set-replica-count:
 	@echo "Running test to set replica count..."
-	$(call curl_command,POST,/replica-count?namespace=default\&deployment=$(APP_NAME) -H "Content-Type: application/json" -d '{"replicas": 3}')
+	$(call curl_command,POST,/replica-count?namespace=$(KUBE_NAMESPACE)\&deployment=$(APP_NAME) -H "Content-Type: application/json" -d '{"replicas": 3}')
 
 # Get the deployments
 test-get-deployments:
@@ -115,4 +116,4 @@ integration-test:
 # Run the test suite
 test:
 	@echo "Running test suite..."
-	go test -v ./cmd/$(APP_NAME)
+	go test -v ./...

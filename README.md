@@ -107,17 +107,17 @@ Once setup is complete and port forwarding is active, the API will be available 
 - **Get Replica Count**: `GET /replica-count?namespace=<namespace>&deployment=<deployment>`
   - **Example:** 
     ```sh
-    curl -X GET "https://localhost:8443/replica-count?namespace=default&deployment=k8s-deployment-scaler" --cert ./certs/client-cert.pem --key ./certs/client-key.pem --cacert ./certs/ca-cert.pem
+    curl -X GET "https://localhost:8443/replica-count?namespace=k8s-deployment-scaler&deployment=k8s-deployment-scaler" --cert ./certs/client-cert.pem --key ./certs/client-key.pem --cacert ./certs/ca-cert.pem
     ```
 - **Set Replica Count**: `POST /replica-count?namespace=<namespace>&deployment=<deployment>`
   - **Example:** 
     ```sh
-    curl -X POST -H "Content-Type: application/json" -d '{"replicas": 5}' "https://localhost:8443/replica-count?namespace=default&deployment=k8s-deployment-scaler" --cert ./certs/client-cert.pem --key ./certs/client-key.pem --cacert ./certs/ca-cert.pem
+    curl -X POST -H "Content-Type: application/json" -d '{"replicas": 5}' "https://localhost:8443/replica-count?namespace=k8s-deployment-scaler&deployment=k8s-deployment-scaler" --cert ./certs/client-cert.pem --key ./certs/client-key.pem --cacert ./certs/ca-cert.pem
     ```
 - **List Deployments**: `GET /deployments?namespace=<namespace>` (namespace is optional)
   - **Example:** 
     ```sh
-    curl -X GET "https://localhost:8443/deployments?namespace=default" --cert ./certs/client-cert.pem --key ./certs/client-key.pem --cacert ./certs/ca-cert.pem
+    curl -X GET "https://localhost:8443/deployments?namespace=k8s-deployment-scaler" --cert ./certs/client-cert.pem --key ./certs/client-key.pem --cacert ./certs/ca-cert.pem
     ```
 
 ## Testing
@@ -182,7 +182,6 @@ The application is deployed using a Helm chart located in the `helm/k8s-deployme
 - **Service:** Exposes the application's API endpoints through a Kubernetes service.
 - **ServiceAccount:** Provides a dedicated service account for the application to interact with the Kubernetes API.
 - **ClusterRole and ClusterRoleBinding:** Defines the permissions required for the application to access and manage deployments.
-- **Role and RoleBinding:** Defines the permissions required for the application to access and manage deployments within a specific namespace.
 
 ## Scripts
 

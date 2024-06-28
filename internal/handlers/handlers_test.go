@@ -1,4 +1,4 @@
-package main
+package handlers_test
 
 import (
 	"context"
@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"k8s-deployment-scaler/internal/handlers"
+	"k8s-deployment-scaler/internal/server"
 
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,11 +33,17 @@ func setupTestEnvironment() (*fake.Clientset, appslisters.DeploymentLister, chan
 	return fakeClientset, deploymentLister, stopCh
 }
 
+// TestHealthCheck function
 func TestHealthCheck(t *testing.T) {
 	fakeClientset, deploymentLister, stopCh := setupTestEnvironment()
 	defer close(stopCh)
 
-	clientset = fakeClientset
+	handlers.SetClientset(fakeClientset)
+
+	srv, err := server.New(deploymentLister, false)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
 
 	req, err := http.NewRequest("GET", "/healthz", nil)
 	if err != nil {
@@ -42,9 +51,7 @@ func TestHealthCheck(t *testing.T) {
 	}
 
 	rr := httptest.NewRecorder()
-	handler := setupHandlers(deploymentLister)
-
-	handler.ServeHTTP(rr, req)
+	srv.Handler.ServeHTTP(rr, req)
 
 	if status := rr.Code; status != http.StatusOK {
 		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
@@ -65,7 +72,7 @@ func TestHandleGetReplicaCount(t *testing.T) {
 	fakeClientset, deploymentLister, stopCh := setupTestEnvironment()
 	defer close(stopCh)
 
-	clientset = fakeClientset
+	handlers.SetClientset(fakeClientset)
 
 	// Create a test deployment
 	_, err := fakeClientset.AppsV1().Deployments("default").Create(context.TODO(), &appsv1.Deployment{
@@ -83,6 +90,11 @@ func TestHandleGetReplicaCount(t *testing.T) {
 
 	// Wait for the cache to sync
 	time.Sleep(100 * time.Millisecond)
+
+	srv, err := server.New(deploymentLister, false)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
 
 	tests := []struct {
 		name           string
@@ -106,7 +118,7 @@ func TestHandleGetReplicaCount(t *testing.T) {
 			name:           "GET non-existent deployment",
 			url:            "/replica-count?namespace=default&deployment=non-existent",
 			expectedStatus: http.StatusNotFound,
-			expectedBody:   `{"message":"Deployment not found in cache","code":404}`,
+			expectedBody:   `{"message":"Deployment not found","code":404}`,
 		},
 	}
 
@@ -118,11 +130,7 @@ func TestHandleGetReplicaCount(t *testing.T) {
 			}
 
 			rr := httptest.NewRecorder()
-			handler := jsonContentTypeMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleGetReplicaCount(w, r, deploymentLister)
-			}))
-
-			handler.ServeHTTP(rr, req)
+			srv.Handler.ServeHTTP(rr, req)
 
 			if status := rr.Code; status != tt.expectedStatus {
 				t.Errorf("handler returned wrong status code: got %v want %v", status, tt.expectedStatus)
@@ -130,16 +138,22 @@ func TestHandleGetReplicaCount(t *testing.T) {
 
 			if strings.TrimSpace(rr.Body.String()) != strings.TrimSpace(tt.expectedBody) {
 				t.Errorf("handler returned unexpected body: got %v want %v", rr.Body.String(), tt.expectedBody)
+				return
 			}
 		})
 	}
 }
 
+// Helper function to create a pointer to an int32
+func int32Ptr(i int32) *int32 {
+	return &i
+}
+
 func TestHandlePostReplicaCount(t *testing.T) {
-	fakeClientset, _, stopCh := setupTestEnvironment()
+	fakeClientset, deploymentLister, stopCh := setupTestEnvironment()
 	defer close(stopCh)
 
-	clientset = fakeClientset
+	handlers.SetClientset(fakeClientset)
 
 	// Create a test deployment
 	_, err := fakeClientset.AppsV1().Deployments("default").Create(context.TODO(), &appsv1.Deployment{
@@ -158,19 +172,26 @@ func TestHandlePostReplicaCount(t *testing.T) {
 	// Wait for the cache to sync
 	time.Sleep(100 * time.Millisecond)
 
+	srv, err := server.New(deploymentLister, false)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+
 	tests := []struct {
-		name           string
-		url            string
-		body           string
-		expectedStatus int
-		expectedBody   string
+		name             string
+		url              string
+		body             string
+		expectedStatus   int
+		expectedBody     string
+		expectedReplicas int32
 	}{
 		{
-			name:           "POST update replica count",
-			url:            "/replica-count?namespace=default&deployment=my-deployment",
-			body:           `{"replicas": 5}`,
-			expectedStatus: http.StatusOK,
-			expectedBody:   `{"replicaCount":5}`,
+			name:             "POST update replica count",
+			url:              "/replica-count?namespace=default&deployment=my-deployment",
+			body:             `{"replicas": 5}`,
+			expectedStatus:   http.StatusOK,
+			expectedBody:     `{"replicaCount":5}`,
+			expectedReplicas: 5,
 		},
 		{
 			name:           "POST invalid replica count",
@@ -184,7 +205,7 @@ func TestHandlePostReplicaCount(t *testing.T) {
 			url:            "/replica-count?namespace=default",
 			body:           `{"replicas": 5}`,
 			expectedStatus: http.StatusBadRequest,
-			expectedBody:   `{"message":"Missing query parameters","code":400}`,
+			expectedBody:   `{"message":"Both namespace and deployment must be specified","code":400}`,
 		},
 		{
 			name:           "POST deployment not found in Kubernetes",
@@ -201,25 +222,33 @@ func TestHandlePostReplicaCount(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			req.Header.Set("Content-Type", "application/json")
 
 			rr := httptest.NewRecorder()
-			handler := jsonContentTypeMiddleware(http.HandlerFunc(handlePostReplicaCount))
-
-			handler.ServeHTTP(rr, req)
+			srv.Handler.ServeHTTP(rr, req)
 
 			if status := rr.Code; status != tt.expectedStatus {
 				t.Errorf("handler returned wrong status code: got %v want %v", status, tt.expectedStatus)
 			}
 
 			if tt.expectedStatus == http.StatusOK {
+				// Check the Scale subresource
+				scale, err := fakeClientset.AppsV1().Deployments("default").GetScale(context.TODO(), "my-deployment", metav1.GetOptions{})
+				if err != nil {
+					t.Fatalf("Error getting scale: %v", err)
+				}
+				if scale.Spec.Replicas != tt.expectedReplicas {
+					t.Errorf("Unexpected replica count: got %d, want %d", scale.Spec.Replicas, tt.expectedReplicas)
+				}
+
 				var result map[string]int32
-				err := json.Unmarshal(rr.Body.Bytes(), &result)
+				err = json.Unmarshal(rr.Body.Bytes(), &result)
 				if err != nil {
 					t.Fatalf("Error unmarshaling JSON response: %v", err)
 				}
 
-				if replicaCount, ok := result["replicaCount"]; !ok || replicaCount != 5 {
-					t.Errorf("handler returned unexpected replicaCount: got %v want %v", replicaCount, 5)
+				if replicaCount, ok := result["replicaCount"]; !ok || replicaCount != tt.expectedReplicas {
+					t.Errorf("handler returned unexpected replicaCount: got %v want %v", replicaCount, tt.expectedReplicas)
 				}
 			} else {
 				if strings.TrimSpace(rr.Body.String()) != strings.TrimSpace(tt.expectedBody) {
@@ -234,7 +263,7 @@ func TestListDeployments(t *testing.T) {
 	fakeClientset, deploymentLister, stopCh := setupTestEnvironment()
 	defer close(stopCh)
 
-	clientset = fakeClientset
+	handlers.SetClientset(fakeClientset)
 
 	// Create test deployments
 	deployments := []*appsv1.Deployment{
@@ -267,6 +296,11 @@ func TestListDeployments(t *testing.T) {
 
 	// Wait for the cache to sync
 	time.Sleep(100 * time.Millisecond)
+
+	srv, err := server.New(deploymentLister, false)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
 
 	tests := []struct {
 		name                string
@@ -307,9 +341,7 @@ func TestListDeployments(t *testing.T) {
 			}
 
 			rr := httptest.NewRecorder()
-			handler := setupHandlers(deploymentLister)
-
-			handler.ServeHTTP(rr, req)
+			srv.Handler.ServeHTTP(rr, req)
 
 			if status := rr.Code; status != tt.expectedStatus {
 				t.Errorf("handler returned wrong status code for %s %s: got %v want %v", tt.method, tt.url, status, tt.expectedStatus)
@@ -345,191 +377,4 @@ func TestListDeployments(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestEncodeAndWriteJSON(t *testing.T) {
-	rr := httptest.NewRecorder()
-	data := map[string]string{"key": "value"}
-
-	err := encodeAndWriteJSON(rr, data)
-	if err != nil {
-		t.Fatalf("encodeAndWriteJSON returned an error: %v", err)
-	}
-
-	if status := rr.Code; status != http.StatusOK {
-		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
-	}
-
-	var result map[string]string
-	err = json.NewDecoder(rr.Body).Decode(&result)
-	if err != nil {
-		t.Fatalf("Error decoding JSON response: %v", err)
-	}
-
-	expected := map[string]string{"key": "value"}
-	if result["key"] != expected["key"] {
-		t.Errorf("handler returned unexpected body: got %v want %v", result, expected)
-	}
-}
-
-func TestLoggingMiddleware(t *testing.T) {
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-
-	req, err := http.NewRequest("GET", "/test", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	rr := httptest.NewRecorder()
-	loggingMiddleware(handler).ServeHTTP(rr, req)
-
-	if status := rr.Code; status != http.StatusOK {
-		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
-	}
-}
-
-func TestJSONContentTypeMiddleware(t *testing.T) {
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("test"))
-	})
-
-	req, err := http.NewRequest("GET", "/test", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	rr := httptest.NewRecorder()
-	jsonContentTypeMiddleware(handler).ServeHTTP(rr, req)
-
-	if status := rr.Code; status != http.StatusOK {
-		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
-	}
-
-	contentType := rr.Header().Get("Content-Type")
-	if contentType != "application/json" {
-		t.Errorf("middleware did not set correct Content-Type: got %v want %v", contentType, "application/json")
-	}
-
-	expected := "test"
-	if rr.Body.String() != expected {
-		t.Errorf("handler returned unexpected body: got %v want %v", rr.Body.String(), expected)
-	}
-}
-
-func TestSetupHandlers(t *testing.T) {
-	fakeClientset, deploymentLister, stopCh := setupTestEnvironment()
-	defer close(stopCh)
-
-	clientset = fakeClientset
-
-	handler := setupHandlers(deploymentLister)
-
-	// Create a test deployment
-	_, err := fakeClientset.AppsV1().Deployments("default").Create(context.TODO(), &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-deployment",
-			Namespace: "default",
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: int32Ptr(3),
-		},
-	}, metav1.CreateOptions{})
-	if err != nil {
-		t.Fatalf("Error creating test deployment: %v", err)
-	}
-
-	// Wait for the cache to sync
-	time.Sleep(100 * time.Millisecond)
-
-	testCases := []struct {
-		method         string
-		path           string
-		expectedStatus int
-	}{
-		{"GET", "/healthz", http.StatusOK},
-		{"GET", "/replica-count?namespace=default&deployment=test-deployment", http.StatusOK},
-		{"POST", "/replica-count", http.StatusBadRequest}, // Expects query parameters
-		{"GET", "/deployments", http.StatusOK},
-		{"GET", "/nonexistent", http.StatusNotFound},
-		{"POST", "/healthz", http.StatusMethodNotAllowed},
-		{"PUT", "/replica-count", http.StatusMethodNotAllowed},
-		{"DELETE", "/deployments", http.StatusMethodNotAllowed},
-	}
-	for _, tc := range testCases {
-		req, err := http.NewRequest(tc.method, tc.path, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, req)
-		if status := rr.Code; status != tc.expectedStatus {
-			t.Errorf("handler returned wrong status code for %s %s: got %v want %v", tc.method, tc.path, status, tc.expectedStatus)
-		}
-	}
-}
-
-func TestGetDeploymentFromCache(t *testing.T) {
-	fakeClientset, deploymentLister, stopCh := setupTestEnvironment()
-	defer close(stopCh)
-
-	clientset = fakeClientset
-
-	// Create a test deployment
-	_, err := fakeClientset.AppsV1().Deployments("default").Create(context.TODO(), &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "existing-deployment",
-			Namespace: "default",
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: int32Ptr(3),
-		},
-	}, metav1.CreateOptions{})
-	if err != nil {
-		t.Fatalf("Error creating test deployment: %v", err)
-	}
-
-	// Wait for the cache to sync
-	time.Sleep(100 * time.Millisecond)
-
-	tests := []struct {
-		name             string
-		namespace        string
-		deploymentName   string
-		expectedFound    bool
-		expectedReplicas int32
-	}{
-		{
-			name:             "Existing deployment",
-			namespace:        "default",
-			deploymentName:   "existing-deployment",
-			expectedFound:    true,
-			expectedReplicas: 3,
-		},
-		{
-			name:           "Non-existing deployment",
-			namespace:      "default",
-			deploymentName: "non-existing-deployment",
-			expectedFound:  false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			deployment, found := getDeploymentFromCache(tt.namespace, tt.deploymentName, deploymentLister)
-			if found != tt.expectedFound {
-				t.Errorf("getDeploymentFromCache() found = %v, want %v", found, tt.expectedFound)
-			}
-			if found && *deployment.Spec.Replicas != tt.expectedReplicas {
-				t.Errorf("getDeploymentFromCache() replicas = %v, want %v", *deployment.Spec.Replicas, tt.expectedReplicas)
-			}
-		})
-	}
-}
-
-// Helper function to create a pointer to an int32
-func int32Ptr(i int32) *int32 {
-	return &i
 }

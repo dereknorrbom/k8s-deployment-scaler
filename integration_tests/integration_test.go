@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	namespace      = "default"
+	namespace      = "k8s-deployment-scaler"
 	deploymentName = "k8s-deployment-scaler"
 	baseURL        = "https://localhost:8443"
 	certPath       = "../certs/client-cert.pem"
